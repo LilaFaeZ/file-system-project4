@@ -3,47 +3,54 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <stdint.h>
+#define FAT_SIZE 4096
+#define FAT_EOF  -1
+#define MAX_FILENAME 16
+#define MAX_FILES 64 //max of 64 files
 
 #include "disk.h"
 
 /******************************************************************************/
 static int active = 0;  /* is the virtual disk open (active) */
 static int handle;      /* file handle to virtual disk       */
-
 /******************************************************************************/
 //structs
 typedef struct {
-    int fat_location;
-    int root_location;
-    int data_start;
-    int free_location;
-    int num_free;
-    int num_files;
+  int total_blocks;
+  int block_size;
+  int fat_start;
+  int fat_length;
+  int root_start;
+  int root_length;
+  int data_start;
 } Boot;
 
 typedef struct {
-    int worker_id;
-    int error;
+    int entries[FAT_SIZE];
 } FAT; //4096 elements long
 
 typedef struct {
-    //name 15 bytes
-    //attribute 1 byte
-    //create time 16 bits
-    //create date 16 bits
-    //last access date 16 bits
-    //last modified time 16 bits
-    //last modified date 16 bits
-    //starting cluster number in FAT 16 bits
-    //File size 32 bits
+    char name[MAX_FILENAME];
 
+    uint16_t start_block;
+    uint32_t file_size;
 
+    uint8_t used;
+} DirEntry;
+
+typedef struct {
+  DirEntry entries[MAX_FILES];
     //bit (short for binary digit) is the smallest unit of digital data, 
     //representing a 0 or 1. 
     //A byte consists of eight bits and is typically used to represent a single
     //character, such as a letter or number
+} RootDirectory; //an array of entries that contain data for the file
 
-} RootDirectory; //max of 64 files
+//global variables so all functions have access
+Boot boot;
+FAT fat;
+RootDirectory root;
 
 int make_disk(char *name)
 { 
@@ -70,46 +77,108 @@ int make_disk(char *name)
 }
 //make_fs
 int make_fs(char *disk_name){
-  //This function creates a fresh (and empty) file system on a virtual disk with name disk_name.
-  //FIRST INVOKE MAKE_DISK
-  make_disk(disk_name);
-  //Then, open this disk and write/initialize the necessary meta-information 
+  if (make_disk(disk_name) < 0) return -1;
+  if (open_disk(disk_name) < 0) return -1;
+
+  //Initialize necessary meta information for this disk
+  boot.total_blocks = DISK_BLOCKS;
+  boot.block_size = BLOCK_SIZE;
+
+  boot.fat_start = 1;
+  boot.fat_length = (FAT_SIZE * sizeof(int)) / BLOCK_SIZE;
+
+  if ((FAT_SIZE * sizeof(int)) % BLOCK_SIZE != 0){
+    boot.fat_length++;
+  }
+
+  boot.root_start = boot.fat_start + boot.fat_length;
+  boot.root_length = (sizeof(RootDirectory)) / BLOCK_SIZE;
+  
+  if ((sizeof(RootDirectory)) % BLOCK_SIZE != 0){
+    boot.root_length++;
+  }
+  boot.data_start = boot.root_start + boot.root_length;
+
+  //FAT
+  for (int i = 0; i < FAT_SIZE; i++) {
+    fat.entries[i] = 0; //0 is the free block
+  }
+
+  //ROOT directory
+  for (int i = 0; i < MAX_FILES; i++) {
+    root.entries[i].used = 0;
+  }
+
+  //WRITE block
+  char buf[BLOCK_SIZE];
+  memset(buf, 0, BLOCK_SIZE);
+  memcpy(buf, &boot, sizeof(Boot));
+  block_write(0, buf);
+  //write FAT
+  int fat_blocks = boot.fat_length;
+  char *fat_ptr = (char *)&fat;
+
+  for (int i = 0; i < fat_blocks; i++) {
+    memset(buf, 0, BLOCK_SIZE);
+    memcpy(buf, fat_ptr + i * BLOCK_SIZE, BLOCK_SIZE);
+    block_write(boot.fat_start + i, buf);    
+  }
+
+  //write root dir
+  int root_blocks = boot.root_length;
+  char *root_ptr = (char *)&root;
+  for (int i = 0; i < root_blocks; i++) {
+    memset(buf, 0, BLOCK_SIZE);
+    memcpy(buf, root_ptr + i * BLOCK_SIZE, BLOCK_SIZE);
+    block_write(boot.root_start + i, buf);
+  }
+  close_disk();
+  return 0;
+
   //for your file system so that it can be later used (mounted).
   return 0;
 }
 
 //With the mount operation, a file system becomes "ready for use."
 int mount_fs(char *disk_name){
-  //You need to open the disk and then load to memory the 
-  //meta-information that is necessary to handle the file system 
-  //operations that are discussed below.
+  if (open_disk(disk_name) < 0) return -1;
+  char buf[BLOCK_SIZE];
 
-  //the function returns 0 on success, and -1 when the disk disk_name could not 
-  //be opened or when the disk does not contain a valid file system (that you 
-  //previously created with make_fs).
+  //load Boot, FAT, Root into memory
+  char *fat_ptr = (char *)&fat; //read fat into mem
+  for (int i = 0; i < boot.fat_length; i++) {
+    if (block_read(boot.fat_start + i, buf) < 0) return -1;
+    memcpy(fat_ptr + i * BLOCK_SIZE, buf, BLOCK_SIZE);
+  }
+
+  char *root_ptr = (char *)&root; //read root into mem
+  for (int i = 0; i < boot.root_length; i++) {
+    if (block_read(boot.root_start + i, buf) < 0) return -1;
+    memcpy(root_ptr + i * BLOCK_SIZE, buf, BLOCK_SIZE);
+  }
+  return 0;
 
 
-  /*
-  Make fs is just creating the disk and writing boot to it
-Create a disk (code provided)
-Open the disk (code provided)
-Completely blank file 
-Add initial info (boot, fat, root directory)
-Close disk 
-Return 0 on success and -1 on fail
-*/
   return 0;
 }
 //this function unmounts your file system from a virtual disk with name disk_name.
 int umount_fs(char *disk_name){
-  /*you need to write back to disk all meta-information cached in memory 
-  so that the disk persistently reflects all changes that were made to 
-  the file system (such as new files that are created, data that is written, ...). 
-  You should also close the disk.
+  char buf[BLOCK_SIZE];
+  char *fat_ptr = (char *)&fat;
+  for (int i = 0; i < boot.fat_length; i++) {
+    memset(buf, 0, BLOCK_SIZE);
+    memcpy(buf, fat_ptr + i * BLOCK_SIZE, BLOCK_SIZE);
+    if (block_write(boot.fat_start + i, buf) < 0) return -1;
+  }
 
-  function returns 0 on success, and -1 when the disk disk_name could not be closed 
-  or when data could not be written to the disk (this should not happen).
-  */
+  char *root_ptr = (char *)&root;
+
+  for (int i = 0; i < boot.root_length; i++) {
+    memset(buf, 0, BLOCK_SIZE);
+    memcpy(buf, root_ptr + i * BLOCK_SIZE, BLOCK_SIZE);
+    if (block_write(boot.root_start + i, buf) < 0) return -1;
+  }
+  if (close_disk() < 0) return -1;
   return 0;
 }
 
