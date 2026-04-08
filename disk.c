@@ -34,6 +34,51 @@ int make_disk(char *name)
 
   return 0;
 }
+//make_fs
+int make_fs(char *disk_name){
+  //This function creates a fresh (and empty) file system on a virtual disk with name disk_name.
+  //FIRST INVOKE MAKE_DISK
+  make_disk(disk_name);
+  //Then, open this disk and write/initialize the necessary meta-information 
+  //for your file system so that it can be later used (mounted).
+  return 0;
+}
+
+//With the mount operation, a file system becomes "ready for use."
+int mount_fs(char *disk_name){
+  //You need to open the disk and then load to memory the 
+  //meta-information that is necessary to handle the file system 
+  //operations that are discussed below.
+
+  //the function returns 0 on success, and -1 when the disk disk_name could not 
+  //be opened or when the disk does not contain a valid file system (that you 
+  //previously created with make_fs).
+
+
+  /*
+  Make fs is just creating the disk and writing boot to it
+Create a disk (code provided)
+Open the disk (code provided)
+Completely blank file 
+Add initial info (boot, fat, root directory)
+Close disk 
+Return 0 on success and -1 on fail
+*/
+  return 0;
+}
+//this function unmounts your file system from a virtual disk with name disk_name.
+int umount_fs(char *disk_name){
+  /*you need to write back to disk all meta-information cached in memory 
+  so that the disk persistently reflects all changes that were made to 
+  the file system (such as new files that are created, data that is written, ...). 
+  You should also close the disk.
+
+  function returns 0 on success, and -1 when the disk disk_name could not be closed 
+  or when data could not be written to the disk (this should not happen).
+  */
+  return 0;
+}
+
 
 int open_disk(char *name)
 {
