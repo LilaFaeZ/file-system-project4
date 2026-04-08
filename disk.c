@@ -11,6 +11,40 @@ static int active = 0;  /* is the virtual disk open (active) */
 static int handle;      /* file handle to virtual disk       */
 
 /******************************************************************************/
+//structs
+typedef struct {
+    int fat_location;
+    int root_location;
+    int data_start;
+    int free_location;
+    int num_free;
+    int num_files;
+} Boot;
+
+typedef struct {
+    int worker_id;
+    int error;
+} FAT; //4096 elements long
+
+typedef struct {
+    //name 15 bytes
+    //attribute 1 byte
+    //create time 16 bits
+    //create date 16 bits
+    //last access date 16 bits
+    //last modified time 16 bits
+    //last modified date 16 bits
+    //starting cluster number in FAT 16 bits
+    //File size 32 bits
+
+
+    //bit (short for binary digit) is the smallest unit of digital data, 
+    //representing a 0 or 1. 
+    //A byte consists of eight bits and is typically used to represent a single
+    //character, such as a letter or number
+
+} RootDirectory; //max of 64 files
+
 int make_disk(char *name)
 { 
   int f, cnt;
