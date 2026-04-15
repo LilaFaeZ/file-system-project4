@@ -46,6 +46,16 @@ typedef struct {
     //character, such as a letter or number
 } RootDirectory; //an array of entries that contain data for the file
 
+#define MAX_FD 32
+
+typedef struct {
+    int used; //is slot occupied
+    int dir_index; //which file in root
+    int offset; //where in file
+} FileDescriptor;
+
+FileDescriptor fd_table[MAX_FD];
+
 //global variables so all functions have access
 Boot boot;
 FAT fat;
@@ -274,16 +284,30 @@ int block_read(int block, char *buf)
 //functions for week 2
 
 int fs_open(char *name){
+    int dir_idx = find_file(name);
+    if (dir_idx == -1) return -1;
+
+    int fd = find_free_fd();
+    if (fd == -1) return -1;
+
+    fd_table[fd].used = 1;
+    fd_table[fd].dir_index = dir_idx;
+    fd_table[fd].offset = 0;
+
+    return fd;
   /*File descriptor is returned
 Max of 32 file descriptors at the same time
 Need to keep a file descriptor table (relate file descriptor to… ?)
 (Can have the same file open multiple times, so name isn’t an option)
 File descriptor table is NOT metadata- should be erased every time you
 mount/unmount, do NOT write it back to your file system*/
-  return 0;
 }
 
-int fs_close(char *name){
+int fs_close(int fildes){
+  if (fildes < 0 || fildes >= MAX_FD) return -1;
+    if (!fd_table[fildes].used) return -1;
+    fd_table[fildes].used = 0;
+    return 0;
   /*
   Close the file
 Make sure file descriptor can be reused for a different file after this
@@ -292,7 +316,40 @@ Again, DO NOT touch the metadata
   return 0;
 }
 
+int find_file(char *name) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (root.entries[i].used &&
+            strcmp(root.entries[i].name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int find_free_dir() {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!root.entries[i].used) return i;
+    }
+    return -1;
+}
+
+int find_free_fd() {
+    for (int i = 0; i < MAX_FD; i++) {
+        if (!fd_table[i].used) return i;
+    }
+    return -1;
+}
+
 int fs_create(char *name){
+  if (strlen(name) >= MAX_FILENAME) return -1;
+    if (find_file(name) != -1) return -1; // already exists
+    int idx = find_free_dir();
+    if (idx == -1) return -1;
+
+    strcpy(root.entries[idx].name, name);
+    root.entries[idx].start_block = FAT_EOF;
+    root.entries[idx].file_size = 0;
+    root.entries[idx].used = 1;
 /*Does not open the file, just creates it
 Need to edit the metadata of your file system to indicate that the file has been
 created*/
@@ -301,6 +358,17 @@ created*/
 }
 
 int fs_delete(char *name){
+  int idx = find_file(name);
+  if (idx == -1) return -1;
+
+  int block = root.entries[idx].start_block;
+    //free FAT chain
+  while (block != FAT_EOF && block != 0) {
+      int next = fat.entries[block];
+      fat.entries[block] = 0;
+      block = next;
+  }
+  root.entries[idx].used = 0;
   /*must free all data blocks and metadata
 Also need to indicate that those data blocks have been freed
 */
@@ -308,18 +376,104 @@ Also need to indicate that those data blocks have been freed
 }
 
 int fs_read(int fildes, void *buf, size_t nbyte){
+  if (fildes < 0 || fildes >= MAX_FD) return -1;
+  if (!fd_table[fildes].used) return -1;
+
+  FileDescriptor *fd = &fd_table[fildes];
+  DirEntry *file = &root.entries[fd->dir_index];
+
+  if (fd->offset >= file->file_size) return 0;
+
+  int bytes_read = 0;
+  int block = file->start_block;
+  int offset = fd->offset;
+
+  char block_buf[BLOCK_SIZE];
+
+    //adjust accordingly!
+  while (offset >= BLOCK_SIZE && block != FAT_EOF) {
+      offset -= BLOCK_SIZE;
+      block = fat.entries[block];
+  }
+
+  while (block != FAT_EOF && bytes_read < nbyte) {
+    block_read(boot.data_start + block, block_buf);
+    int to_copy = BLOCK_SIZE - offset;
+      if (to_copy > (nbyte - bytes_read)){
+        to_copy = nbyte - bytes_read;
+      }
+        memcpy(buf + bytes_read, block_buf + offset, to_copy);
+
+        bytes_read += to_copy;
+        fd->offset += to_copy;
+
+        offset = 0;
+        block = fat.entries[block];
+    }
+    return bytes_read;
   /*Need to find the file descriptor in the file descriptor table, 
   find which file it points to, find that file in the metadata, 
   then follow the file through the data blocks until nbytes are read*/
-  return 0;
 }
 
 int fs_write(int fildes, void *buf, size_t nbyte){
-  /*Make sure to return the number of bytes actually written*/
-  return 0;
+    if (fildes < 0 || fildes >= MAX_FD) return -1;
+    if (!fd_table[fildes].used) return -1;
+
+    FileDescriptor *fd = &fd_table[fildes];
+    DirEntry *file = &root.entries[fd->dir_index];
+
+    int bytes_written = 0;
+    int block = file->start_block;
+
+    // if file is empty, allocate first block
+    if (block == FAT_EOF) {
+        block = find_free_block();
+        if (block == -1) return 0;
+
+        file->start_block = block;
+        fat.entries[block] = FAT_EOF;
+    }
+
+    char block_buf[BLOCK_SIZE];
+
+    while (bytes_written < nbyte) {
+        block_read(boot.data_start + block, block_buf);
+
+        int to_copy = BLOCK_SIZE;
+        if (to_copy > (nbyte - bytes_written))
+            to_copy = nbyte - bytes_written;
+
+        memcpy(block_buf, buf + bytes_written, to_copy);
+
+        block_write(boot.data_start + block, block_buf);
+
+        bytes_written += to_copy;
+
+        if (fat.entries[block] == FAT_EOF) {
+            int new_block = find_free_block();
+            if (new_block == -1) break;
+
+            fat.entries[block] = new_block;
+            fat.entries[new_block] = FAT_EOF;
+        }
+
+        block = fat.entries[block];
+    }
+
+    file->file_size += bytes_written;
+    return bytes_written;
+
+    /*Make sure to return the number of bytes actually written*/
 }
 
 int fs_lseek(int fildes, off_t offset){
+  if (fildes < 0 || fildes >= MAX_FD) return -1;
+    if (!fd_table[fildes].used) return -1;
+
+    if (offset < 0) return -1;
+
+    fd_table[fildes].offset = offset;
   /*
   Just move the pointer in the file description table
 Can set to end of file to append when writing
@@ -328,6 +482,17 @@ Can set to end of file to append when writing
 }
 
 int fs_truncate(int fildes, off_t length){
+  if (fildes < 0 || fildes >= MAX_FD) return -1;
+  if (!fd_table[fildes].used) return -1;
+
+  DirEntry *file = &root.entries[fd_table[fildes].dir_index];
+
+  if (length > file->file_size) return -1;
+
+  file->file_size = length;
+
+  if (fd_table[fildes].offset > length)
+    fd_table[fildes].offset = length;
   /*When the file pointer is larger than the new length, 
   then it is also set to length (the end of the file)
   must free data blocks!!!*/
