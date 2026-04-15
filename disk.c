@@ -8,7 +8,6 @@
 #define FAT_EOF  -1
 #define MAX_FILENAME 16
 #define MAX_FILES 64 //max of 64 files
-
 #include "disk.h"
 
 /******************************************************************************/
@@ -269,5 +268,68 @@ int block_read(int block, char *buf)
     return -1;
   }
 
+  return 0;
+}
+
+//functions for week 2
+
+int fs_open(char *name){
+  /*File descriptor is returned
+Max of 32 file descriptors at the same time
+Need to keep a file descriptor table (relate file descriptor to… ?)
+(Can have the same file open multiple times, so name isn’t an option)
+File descriptor table is NOT metadata- should be erased every time you
+mount/unmount, do NOT write it back to your file system*/
+  return 0;
+}
+
+int fs_close(char *name){
+  /*
+  Close the file
+Make sure file descriptor can be reused for a different file after this
+Again, DO NOT touch the metadata
+*/
+  return 0;
+}
+
+int fs_create(char *name){
+/*Does not open the file, just creates it
+Need to edit the metadata of your file system to indicate that the file has been
+created*/
+  return 0;
+
+}
+
+int fs_delete(char *name){
+  /*must free all data blocks and metadata
+Also need to indicate that those data blocks have been freed
+*/
+  return 0;
+}
+
+int fs_read(int fildes, void *buf, size_t nbyte){
+  /*Need to find the file descriptor in the file descriptor table, 
+  find which file it points to, find that file in the metadata, 
+  then follow the file through the data blocks until nbytes are read*/
+  return 0;
+}
+
+int fs_write(int fildes, void *buf, size_t nbyte){
+  /*Make sure to return the number of bytes actually written*/
+  return 0;
+}
+
+int fs_lseek(int fildes, off_t offset){
+  /*
+  Just move the pointer in the file description table
+Can set to end of file to append when writing
+*/
+  return 0;
+}
+
+int fs_truncate(int fildes, off_t length){
+  /*When the file pointer is larger than the new length, 
+  then it is also set to length (the end of the file)
+  must free data blocks!!!*/
   return 0;
 }
