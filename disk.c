@@ -9,6 +9,7 @@
 #define MAX_FILENAME 16
 #define MAX_FILES 64 //max of 64 files
 #include "disk.h"
+#define MAX_FD 32 //Max of 32 file descriptors at the same time
 
 /******************************************************************************/
 static int active = 0;  /* is the virtual disk open (active) */
@@ -45,8 +46,6 @@ typedef struct {
     //A byte consists of eight bits and is typically used to represent a single
     //character, such as a letter or number
 } RootDirectory; //an array of entries that contain data for the file
-
-#define MAX_FD 32
 
 typedef struct {
     int used; //is slot occupied
@@ -149,12 +148,15 @@ int make_fs(char *disk_name){
 }
 
 //With the mount operation, a file system becomes "ready for use."
+//Open a disk file and load its filesystem structures to mem
 int mount_fs(char *disk_name){
   if (open_disk(disk_name) < 0) return -1;
   char buf[BLOCK_SIZE];
 
   //load Boot, FAT, Root into memory
   char *fat_ptr = (char *)&fat; //read fat into mem
+  if (block_read(0, buf) < 0) return -1;
+  memcpy(&boot, buf, sizeof(Boot));
   for (int i = 0; i < boot.fat_length; i++) {
     if (block_read(boot.fat_start + i, buf) < 0) return -1;
     memcpy(fat_ptr + i * BLOCK_SIZE, buf, BLOCK_SIZE);
@@ -165,9 +167,9 @@ int mount_fs(char *disk_name){
     if (block_read(boot.root_start + i, buf) < 0) return -1;
     memcpy(root_ptr + i * BLOCK_SIZE, buf, BLOCK_SIZE);
   }
-  return 0;
-
-
+  for (int i = 0; i < MAX_FD; i++) {
+    fd_table[i].used = 0;
+  }
   return 0;
 }
 //this function unmounts your file system from a virtual disk with name disk_name.
@@ -196,7 +198,7 @@ int open_disk(char *name)
 {
   int f;
 
-  if (!name) {
+  if (!name) { //if name could be NULL
     fprintf(stderr, "open_disk: invalid file name\n");
     return -1;
   }  
@@ -206,27 +208,25 @@ int open_disk(char *name)
     return -1;
   }
   
-  if ((f = open(name, O_RDWR, 0644)) < 0) {
+  if ((f = open(name, O_RDWR, 0644)) < 0) { //opens for reading + writing, owner (6 r+w), group and others r only
     perror("open_disk: cannot open file");
     return -1;
   }
 
-  handle = f;
-  active = 1;
+  handle = f; //fd
+  active = 1; //makes it active 
 
   return 0;
 }
 
 int close_disk()
 {
-  if (!active) {
+  if (!active) { //if not active, exit
     fprintf(stderr, "close_disk: no open disk\n");
     return -1;
   }
-  
-  close(handle);
-
-  active = handle = 0;
+  close(handle); //close the file descriptor
+  active = handle = 0; //set both var to 0
 
   return 0;
 }
@@ -340,6 +340,15 @@ int find_free_fd() {
     return -1;
 }
 
+int find_free_block() {
+  for (int i = 0; i < FAT_SIZE; i++) {
+    if (fat.entries[i] == 0) {
+      return i;
+    }
+  }
+    return -1;  
+}
+
 int fs_create(char *name){
   if (strlen(name) >= MAX_FILENAME) return -1;
     if (find_file(name) != -1) return -1; // already exists
@@ -369,6 +378,8 @@ int fs_delete(char *name){
       block = next;
   }
   root.entries[idx].used = 0;
+  root.entries[idx].start_block = FAT_EOF;
+  root.entries[idx].file_size = 0;
   /*must free all data blocks and metadata
 Also need to indicate that those data blocks have been freed
 */
@@ -402,7 +413,7 @@ int fs_read(int fildes, void *buf, size_t nbyte){
       if (to_copy > (nbyte - bytes_read)){
         to_copy = nbyte - bytes_read;
       }
-        memcpy(buf + bytes_read, block_buf + offset, to_copy);
+        memcpy((char *)buf + bytes_read, block_buf + offset, to_copy);
 
         bytes_read += to_copy;
         fd->offset += to_copy;
@@ -425,6 +436,7 @@ int fs_write(int fildes, void *buf, size_t nbyte){
 
     int bytes_written = 0;
     int block = file->start_block;
+    int offset = fd->offset;
 
     // if file is empty, allocate first block
     if (block == FAT_EOF) {
@@ -444,7 +456,7 @@ int fs_write(int fildes, void *buf, size_t nbyte){
         if (to_copy > (nbyte - bytes_written))
             to_copy = nbyte - bytes_written;
 
-        memcpy(block_buf, buf + bytes_written, to_copy);
+        memcpy((char *)buf + bytes_written, block_buf + offset, to_copy);
 
         block_write(boot.data_start + block, block_buf);
 
@@ -498,3 +510,6 @@ int fs_truncate(int fildes, off_t length){
   must free data blocks!!!*/
   return 0;
 }
+//Non-contiguous memory allocation in computer science is a technique 
+//where a process's data or code is stored in separate, scattered memory 
+//locations rather than a single, adjacent block
