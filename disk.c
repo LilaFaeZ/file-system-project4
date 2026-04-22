@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "disk.h"
+#include <pthread.h>
 
 #define FAT_SIZE 4096 //#of data blocks
 #define FAT_EOF  -1 //#end of file chain
@@ -518,6 +519,17 @@ int fs_truncate(int fildes, off_t length){
   then it is also set to length (the end of the file)
   must free data blocks!!!*/
   return 0;
+}
+
+int fs_allNecessaryFunc(){
+  return 1;
+}
+
+int main(){
+  pthread_t thread_id;
+  if (pthread_create(&thread_id, NULL, NULL, NULL) == 0) {
+        printf("Thread created successfully\n");}
+
 }
 //Non-contiguous memory allocation in computer science is a technique 
 //where a process's data or code is stored in separate, scattered memory 
