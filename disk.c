@@ -4,18 +4,22 @@
 #include <fcntl.h>
 #include <string.h>
 #include <stdint.h>
-#define FAT_SIZE 4096
-#define FAT_EOF  -1
-#define MAX_FILENAME 16
-#define MAX_FILES 64 //max of 64 files
 #include "disk.h"
-#define MAX_FD 32 //Max of 32 file descriptors at the same time
+
+#define FAT_SIZE 4096 //#of data blocks
+#define FAT_EOF  -1 //#end of file chain
+#define MAX_FILENAME 16 //max length of file name
+#define MAX_FILES 64 //max of 64 files
+#define MAX_FD 32 //Max of 32 file descriptors at the same time (max files open)
 
 /******************************************************************************/
 static int active = 0;  /* is the virtual disk open (active) */
 static int handle;      /* file handle to virtual disk       */
 /******************************************************************************/
 //structs
+
+//metadata about the filesystem --> specifically FAT starts, root dir beigins, and data begins
+//important to store locations, otherwise cannot find anything
 typedef struct {
   int total_blocks;
   int block_size;
@@ -26,29 +30,26 @@ typedef struct {
   int data_start;
 } Boot;
 
+//which blocks belong where
 typedef struct {
-    int entries[FAT_SIZE];
+    int entries[FAT_SIZE]; //each entry is a block, last block of file is EOF (-1)
 } FAT; //4096 elements long
 
 typedef struct {
     char name[MAX_FILENAME];
 
-    uint16_t start_block;
-    uint32_t file_size;
+    uint16_t start_block; //wehre in FAT it starts
+    uint32_t file_size; //size
 
-    uint8_t used;
+    uint8_t used;//slotused or not
 } DirEntry;
 
 typedef struct {
   DirEntry entries[MAX_FILES];
-    //bit (short for binary digit) is the smallest unit of digital data, 
-    //representing a 0 or 1. 
-    //A byte consists of eight bits and is typically used to represent a single
-    //character, such as a letter or number
-} RootDirectory; //an array of entries that contain data for the file
+} RootDirectory; //an array of entries that contain data for the file, aka main folder
 
 typedef struct {
-    int used; //is slot occupied
+    int used; //is slot /file open
     int dir_index; //which file in root
     int offset; //where in file
 } FileDescriptor;
@@ -59,6 +60,8 @@ FileDescriptor fd_table[MAX_FD];
 Boot boot;
 FAT fat;
 RootDirectory root;
+
+//low level I/O 
 
 int make_disk(char *name)
 { 
