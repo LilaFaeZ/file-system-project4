@@ -48,6 +48,7 @@ typedef struct {
   DirEntry entries[MAX_FILES];
 } RootDirectory; //an array of entries that contain data for the file, aka main folder
 
+//not saved to the disk!!! current read/write pos
 typedef struct {
     int used; //is slot /file open
     int dir_index; //which file in root
@@ -61,8 +62,7 @@ Boot boot;
 FAT fat;
 RootDirectory root;
 
-//low level I/O 
-
+//low level I/O to create disk
 int make_disk(char *name)
 { 
   int f, cnt;
@@ -86,7 +86,7 @@ int make_disk(char *name)
 
   return 0;
 }
-//make_fs
+//make_fs, initialize everything
 int make_fs(char *disk_name){
   if (make_disk(disk_name) < 0) return -1;
   if (open_disk(disk_name) < 0) return -1;
@@ -110,14 +110,14 @@ int make_fs(char *disk_name){
   }
   boot.data_start = boot.root_start + boot.root_length;
 
-  //FAT
+  //initialize FAT
   for (int i = 0; i < FAT_SIZE; i++) {
     fat.entries[i] = 0; //0 is the free block
   }
 
   //ROOT directory
   for (int i = 0; i < MAX_FILES; i++) {
-    root.entries[i].used = 0;
+    root.entries[i].used = 0; //no files yet
   }
 
   //WRITE block
@@ -150,8 +150,8 @@ int make_fs(char *disk_name){
   return 0;
 }
 
-//With the mount operation, a file system becomes "ready for use."
-//Open a disk file and load its filesystem structures to mem
+//With the mount operation, a file system becomes "ready for use" by reading boot,fat,root
+//Open a disk file and load its filesystem structures to memory
 int mount_fs(char *disk_name){
   if (open_disk(disk_name) < 0) return -1;
   char buf[BLOCK_SIZE];
@@ -176,6 +176,7 @@ int mount_fs(char *disk_name){
   return 0;
 }
 //this function unmounts your file system from a virtual disk with name disk_name.
+//writes memory to disk (saves root and FAT)
 int umount_fs(char *disk_name){
   char buf[BLOCK_SIZE];
   char *fat_ptr = (char *)&fat;
@@ -271,7 +272,7 @@ int block_read(int block, char *buf)
     return -1;
   }
 
-  if (lseek(handle, block * BLOCK_SIZE, SEEK_SET) < 0) {
+  if (lseek(handle, block * BLOCK_SIZE, SEEK_SET) < 0) { //moves to correct block location
     perror("block_read: failed to lseek");
     return -1;
   }
@@ -286,6 +287,7 @@ int block_read(int block, char *buf)
 
 //functions for week 2
 
+//finds file and assigns file descriptor
 int fs_open(char *name){
     int dir_idx = find_file(name);
     if (dir_idx == -1) return -1;
@@ -306,6 +308,7 @@ File descriptor table is NOT metadata- should be erased every time you
 mount/unmount, do NOT write it back to your file system*/
 }
 
+//marks descriptors unused (frees them)
 int fs_close(int fildes){
   if (fildes < 0 || fildes >= MAX_FD) return -1;
     if (!fd_table[fildes].used) return -1;
@@ -351,7 +354,7 @@ int find_free_block() {
   }
     return -1;  
 }
-
+//adds file meta data
 int fs_create(char *name){
   if (strlen(name) >= MAX_FILENAME) return -1;
     if (find_file(name) != -1) return -1; // already exists
@@ -368,7 +371,7 @@ created*/
   return 0;
 
 }
-
+//deletes file
 int fs_delete(char *name){
   int idx = find_file(name);
   if (idx == -1) return -1;
@@ -389,6 +392,8 @@ Also need to indicate that those data blocks have been freed
   return 0;
 }
 
+//finds file via file descriptor, locates the starting block, 
+//traverses FAT, then read block by block
 int fs_read(int fildes, void *buf, size_t nbyte){
   if (fildes < 0 || fildes >= MAX_FD) return -1;
   if (!fd_table[fildes].used) return -1;
@@ -430,6 +435,7 @@ int fs_read(int fildes, void *buf, size_t nbyte){
   then follow the file through the data blocks until nbytes are read*/
 }
 
+//allocate first block that is empty, write into block, if full finds new block, and linked via FAT for dynamic growth
 int fs_write(int fildes, void *buf, size_t nbyte){
     if (fildes < 0 || fildes >= MAX_FD) return -1;
     if (!fd_table[fildes].used) return -1;
@@ -459,7 +465,7 @@ int fs_write(int fildes, void *buf, size_t nbyte){
         if (to_copy > (nbyte - bytes_written))
             to_copy = nbyte - bytes_written;
 
-        memcpy((char *)buf + bytes_written, block_buf + offset, to_copy);
+        memcpy(block_buf + offset, (char *)buf + bytes_written, to_copy);
 
         block_write(boot.data_start + block, block_buf);
 
@@ -481,7 +487,7 @@ int fs_write(int fildes, void *buf, size_t nbyte){
 
     /*Make sure to return the number of bytes actually written*/
 }
-
+//moves reader and write pointer
 int fs_lseek(int fildes, off_t offset){
   if (fildes < 0 || fildes >= MAX_FD) return -1;
     if (!fd_table[fildes].used) return -1;
@@ -495,7 +501,7 @@ Can set to end of file to append when writing
 */
   return 0;
 }
-
+//freeing unused FAT blocks
 int fs_truncate(int fildes, off_t length){
   if (fildes < 0 || fildes >= MAX_FD) return -1;
   if (!fd_table[fildes].used) return -1;
