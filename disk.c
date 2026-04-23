@@ -448,6 +448,11 @@ int fs_write(int fildes, void *buf, size_t nbyte){
     int block = file->start_block;
     int offset = fd->offset;
 
+    while (offset >= BLOCK_SIZE && block != FAT_EOF) { //moves to correct block
+      offset -= BLOCK_SIZE;
+      block = fat.entries[block];
+    }   
+
     // if file is empty, allocate first block
     if (block == FAT_EOF) {
         block = find_free_block();
@@ -462,28 +467,37 @@ int fs_write(int fildes, void *buf, size_t nbyte){
     while (bytes_written < nbyte) {
         block_read(boot.data_start + block, block_buf);
 
-        int to_copy = BLOCK_SIZE;
-        if (to_copy > (nbyte - bytes_written))
-            to_copy = nbyte - bytes_written;
+        int space = BLOCK_SIZE - offset;
+        int to_copy;
+        if ((nbyte - bytes_written) < space) {
+          to_copy = nbyte - bytes_written;
+        } else {
+          to_copy = space;
+        }
 
         memcpy(block_buf + offset, (char *)buf + bytes_written, to_copy);
 
         block_write(boot.data_start + block, block_buf);
 
         bytes_written += to_copy;
+        fd->offset += to_copy;
 
-        if (fat.entries[block] == FAT_EOF) {
+        offset = 0;
+        if (bytes_written<nbyte) {
+          if (fat.entries[block] == FAT_EOF) {
             int new_block = find_free_block();
             if (new_block == -1) break;
 
             fat.entries[block] = new_block;
             fat.entries[new_block] = FAT_EOF;
+          }
+          block = fat.entries[block];
         }
-
-        block = fat.entries[block];
+    }
+    if (fd->offset > file->file_size) {
+      file->file_size = fd->offset;
     }
 
-    file->file_size += bytes_written;
     return bytes_written;
 
     /*Make sure to return the number of bytes actually written*/
@@ -509,12 +523,49 @@ int fs_truncate(int fildes, off_t length){
 
   DirEntry *file = &root.entries[fd_table[fildes].dir_index];
 
-  if (length > file->file_size) return -1;
+  if (length > file->file_size) return -1; //cannot extend file thru truncatefunc
+  if (length == 0) {
+    int block = file->start_block;
 
-  file->file_size = length;
+    while (block != FAT_EOF && block != 0) {
+      int next = fat.entries[block];
+      fat.entries[block] = 0;  // mark free
+      block = next;
+    }
 
-  if (fd_table[fildes].offset > length)
-    fd_table[fildes].offset = length;
+      file->start_block = FAT_EOF;
+      file->file_size = 0;
+      fd_table[fildes].offset = 0;
+      return 0;
+    }
+
+    //traverse to fat to find trunc point
+    int block = file->start_block;
+    int prev = -1;
+    int remaining = length;
+
+    while (block != FAT_EOF && remaining > BLOCK_SIZE) {
+      remaining -= BLOCK_SIZE;
+      prev = block;
+      block = fat.entries[block];
+    }
+
+    if (block == FAT_EOF) return 0;
+    //free rest of chain
+    int to_free = fat.entries[block];
+    fat.entries[block] = FAT_EOF;
+
+    while (to_free != FAT_EOF) {
+        int next = fat.entries[to_free];
+        fat.entries[to_free] = 0;
+        to_free = next;
+    }
+    //update file size
+    file->file_size = length;
+    //adjust fildes offset
+    if (fd_table[fildes].offset > length) {
+        fd_table[fildes].offset = length;
+    }
   /*When the file pointer is larger than the new length, 
   then it is also set to length (the end of the file)
   must free data blocks!!!*/
