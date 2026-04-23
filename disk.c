@@ -39,7 +39,7 @@ typedef struct {
 typedef struct {
     char name[MAX_FILENAME];
 
-    uint16_t start_block; //wehre in FAT it starts
+    uint16_t start_block; //where in FAT it starts
     uint32_t file_size; //size
 
     uint8_t used;//slotused or not
@@ -576,12 +576,73 @@ int fs_allNecessaryFunc(){
   return 1;
 }
 
-int main(){
-  pthread_t thread_id;
-  if (pthread_create(&thread_id, NULL, NULL, NULL) == 0) {
-        printf("Thread created successfully\n");}
+void *worker_thread(void *arg) {
+    char *disk_name = (char *)arg;
+    mount_fs(disk_name);
+    //open original file
+    int fd = fs_open("file1.txt");
+    if (fd < 0) { //failure to open
+        printf("Failed to open file1.txt\n");
+        pthread_exit(NULL);
+    }
+    //read data
+    char buffer[1024];
+    memset(buffer, 0, sizeof(buffer));
+    int bytes = fs_read(fd, buffer, sizeof(buffer));
+    fs_close(fd);
+    //creates a copy of file
+    fs_create("copy.txt");
+    //read from old file to write into new UPDATED one
+    int fd_copy = fs_open("copy.txt");
+    fs_write(fd_copy, buffer, bytes);
+    fs_close(fd_copy);
+    //throw old outdated file away!
+    fs_delete("file1.txt");
+    //hexdump
+    system("hexdump -C liladisk | head -n 40");
 
+    int fd2 = fs_open("copy.txt");
+    fs_lseek(fd2, 5);  //move pointer 
+    fs_truncate(fd2, 5);  //shrink the ifle
+
+    char smallbuf[100];
+    memset(smallbuf, 0, sizeof(smallbuf));
+
+    fs_lseek(fd2, 0);
+    fs_read(fd2, smallbuf, sizeof(smallbuf));
+
+    printf("thread after truncate: %s\n", smallbuf);
+    fs_close(fd2);
+
+    //hexdump for truncate func
+    printf("\n[THREAD] HEXDUMP after truncate:\n");
+    system("hexdump -C disk.img | head -n 40");
+
+    umount_fs(disk_name);
+
+    printf("[THREAD] Done.\n");
+    pthread_exit(NULL);
 }
-//Non-contiguous memory allocation in computer science is a technique 
-//where a process's data or code is stored in separate, scattered memory 
-//locations rather than a single, adjacent block
+
+int main(){
+  pthread_t tid;
+  char *disk_name = "liladisk";
+  make_fs(disk_name);
+  
+  //create file
+  fs_create("file1.txt");
+  int fd = fs_open("file1.txt");
+  char *data = "test data";
+  fs_write(fd, data, strlen(data));
+  fs_close(fd); //must close file descriptor!!
+//remove from mem
+  umount_fs(disk_name);
+  if (pthread_create(&tid, NULL, worker_thread, disk_name) != 0) {
+    perror("pthread_create failed");
+    return -1;
+  }
+  //WAIT!
+  pthread_join(tid, NULL);
+  printf("program finished!\n");
+  return 0;
+}
