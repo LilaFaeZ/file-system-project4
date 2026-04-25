@@ -3,86 +3,15 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
-#include <stdint.h>
+#include <stddef.h>
+
 #include "disk.h"
-#include <pthread.h>
-#define FAT_SIZE 4096
-#define FAT_EOF  -1 //#end of file chain
-#define FAT_FREE 0
-#define FAT_RESERVED -2
-#define MAX_FILENAME 16 //max length of file name
-#define MAX_FILES 64 //max of 64 files
-#define MAX_FD 32 //Max of 32 file descriptors at the same time (max files open)
 
 /******************************************************************************/
 static int active = 0;  /* is the virtual disk open (active) */
 static int handle;      /* file handle to virtual disk       */
+
 /******************************************************************************/
-//structs
-
-//metadata about the filesystem --> specifically FAT starts, root dir beigins, and data begins
-//important to store locations, otherwise cannot find anything
-typedef struct {
-  int total_blocks;
-  int block_size;
-  int fat_start;
-  int fat_length;
-  int root_start;
-  int root_length;
-  int data_start;
-} Boot;
-
-//which blocks belong where
-typedef struct {
-    int entries[FAT_SIZE]; //each entry is a block, last block of file is EOF (-1)
-} FAT; //4096 elements long
-
-typedef struct {
-    char name[MAX_FILENAME];
-
-    int start_block; //where in FAT it starts
-    uint32_t file_size; //size
-
-    uint8_t used;//slot used or not
-} DirEntry;
-
-typedef struct {
-  DirEntry entries[MAX_FILES];
-} RootDirectory; //an array of entries that contain data for the file, aka main folder
-
-//not saved to the disk!!! current read/write pos
-typedef struct {
-    int used; //is slot /file open
-    int dir_index; //which file in root
-    int offset; //where in file
-} FileDescriptor;
-
-FileDescriptor fd_table[MAX_FD];
-
-
-//global variables so all functions have access
-Boot boot;
-FAT fat;
-RootDirectory root;
-
-int find_file(char *name) {
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (root.entries[i].used &&
-            strcmp(root.entries[i].name, name) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-int find_free_fd() {
-    for (int i = 0; i < MAX_FD; i++) {
-        if (!fd_table[i].used) return i;
-    }
-    return -1;
-}
-
-//low level I/O to create disk
 int make_disk(char *name)
 { 
   int f, cnt;
@@ -106,150 +35,12 @@ int make_disk(char *name)
 
   return 0;
 }
-//make_fs, initialize everything
-int make_fs(char *disk_name){
-  if (make_disk(disk_name) < 0) return -1;
-  if (open_disk(disk_name) < 0) return -1;
-
-  char buf[BLOCK_SIZE];
-
-  //Initialize boot block
-  memset(&boot, 0, sizeof(Boot));
-
-  boot.total_blocks = DISK_BLOCKS;
-  boot.block_size = BLOCK_SIZE;
-  boot.fat_start = 1;
-  //fat size in boot
-  boot.fat_length = (sizeof(FAT) + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  boot.root_start = boot.fat_start + boot.fat_length;
-  boot.root_length = (sizeof(RootDirectory) + BLOCK_SIZE - 1) / BLOCK_SIZE;
-  boot.data_start = boot.root_start + boot.root_length;
-  //write boot block
-  memset(buf, 0, BLOCK_SIZE);
-  memcpy(buf, &boot, sizeof(Boot));
-  block_write(0, buf);
-
-  //initialize FAT
-  memset(&fat, 0, sizeof(FAT));
-  for (int i = 0; i < boot.data_start; i++) {
-    if (i < boot.data_start) {
-        fat.entries[i] = FAT_RESERVED; // boot + FAT + root
-    } else {
-        fat.entries[i] = FAT_FREE;     // usable data blocks
-    }
-  }
-  //write FAT
-  char *fat_bytes = (char *)&fat;
-  for (int i = 0; i < boot.fat_length; i++) {
-    memset(buf, 0, BLOCK_SIZE);
-    int remaining = sizeof(FAT) - (i * BLOCK_SIZE);
-    int chunk = (remaining > BLOCK_SIZE) ? BLOCK_SIZE : remaining;
-    memcpy(buf, fat_bytes + (i * BLOCK_SIZE), chunk);
-    block_write(boot.fat_start + i, buf);    
-  }
-  //ROOT directory
-  memset(&root, 0, sizeof(RootDirectory));
-  for (int i = 0; i < MAX_FILES; i++) {
-    root.entries[i].used = 0; //no files yet
-    root.entries[i].start_block = FAT_EOF;
-    root.entries[i].file_size = 0;
-    memset(root.entries[i].name, 0, MAX_FILENAME);
-  }
-  //write root dir
-  char *root_bytes = (char *)&root;
-  for (int i = 0; i < boot.root_length; i++) {
-    memset(buf, 0, BLOCK_SIZE);
-    int remaining = sizeof(RootDirectory) - (i * BLOCK_SIZE);
-    int chunk = (remaining > BLOCK_SIZE) ? BLOCK_SIZE : remaining;
-
-    memcpy(buf, root_bytes + (i * BLOCK_SIZE), chunk);
-    block_write(boot.root_start + i, buf);
-  }
-  for (int i = 0; i < MAX_FD; i++) {
-    fd_table[i].used = 0;
-    fd_table[i].dir_index = -1;
-    fd_table[i].offset = 0;
-  }
-  //for your file system so that it can be later used (mounted).
-  active = 1;
-  return 0;
-}
-
-//With the mount operation, a file system becomes "ready for use" by reading boot,fat,root
-//Open a disk file and load its filesystem structures to memory
-int mount_fs(char *disk_name){
-  if (active) {
-    close_disk();   // reset global state
-  }
-
-if (open_disk(disk_name) < 0) {
-    printf("mount_fs: failed to open disk\n");
-    return -1;
-  }
-  char buf[BLOCK_SIZE];
-
-  //load Boot, FAT, Root into memory
-  char *fat_ptr = (char *)&fat; //read fat into mem
-  if (block_read(0, buf) < 0) {
-    printf("mount_fs: boot read failed\n");
-    return -1;
-  }
-  memcpy(&boot, buf, sizeof(Boot));
-  for (int i = 0; i < boot.fat_length; i++) {
-    if (block_read(boot.fat_start + i, buf) < 0) return -1;
-
-    int remaining = sizeof(FAT) - (i * BLOCK_SIZE);
-    int chunk = (remaining > BLOCK_SIZE) ? BLOCK_SIZE : remaining;
-
-    memcpy(fat_ptr + i * BLOCK_SIZE, buf, chunk);
-  }
-
-  char *root_ptr = (char *)&root; //read root into mem
-  for (int i = 0; i < boot.root_length; i++) {
-    if (block_read(boot.root_start + i, buf) < 0) return -1;
-    
-    int remaining = sizeof(RootDirectory) - (i * BLOCK_SIZE);
-    int chunk = (remaining > BLOCK_SIZE) ? BLOCK_SIZE : remaining;
-
-    memcpy(root_ptr + i * BLOCK_SIZE, buf, chunk);
-  }
-  for (int i = 0; i < MAX_FD; i++) {
-    fd_table[i].used = 0;
-  }
-  return 0;
-}
-//this function unmounts your file system from a virtual disk with name disk_name.
-//writes memory to disk (saves root and FAT)
-int umount_fs(char *disk_name){
-  char buf[BLOCK_SIZE];
-  char *fat_ptr = (char *)&fat;
-  for (int i = 0; i < boot.fat_length; i++) {
-    memset(buf, 0, BLOCK_SIZE);
-    int remaining = sizeof(FAT) - (i * BLOCK_SIZE);
-    int chunk = (remaining > BLOCK_SIZE) ? BLOCK_SIZE : remaining;
-    memcpy(buf, fat_ptr + i * BLOCK_SIZE, chunk);
-    if (block_write(boot.fat_start + i, buf) < 0) return -1;
-  }
-
-  char *root_ptr = (char *)&root;
-
-  for (int i = 0; i < boot.root_length; i++) {
-    memset(buf, 0, BLOCK_SIZE);
-    int remaining = sizeof(RootDirectory) - (i * BLOCK_SIZE);
-    int chunk = (remaining > BLOCK_SIZE) ? BLOCK_SIZE : remaining;
-    memcpy(buf, root_ptr + i * BLOCK_SIZE, chunk);
-    if (block_write(boot.root_start + i, buf) < 0) return -1;
-  }
-  if (close_disk() < 0) return -1;
-  return 0;
-}
-
 
 int open_disk(char *name)
 {
   int f;
 
-  if (!name) { //if name could be NULL
+  if (!name) {
     fprintf(stderr, "open_disk: invalid file name\n");
     return -1;
   }  
@@ -259,25 +50,27 @@ int open_disk(char *name)
     return -1;
   }
   
-  if ((f = open(name, O_RDWR, 0644)) < 0) { //opens for reading + writing, owner (6 r+w), group and others r only
+  if ((f = open(name, O_RDWR, 0644)) < 0) {
     perror("open_disk: cannot open file");
     return -1;
   }
 
-  handle = f; //fd
-  active = 1; //makes it active 
+  handle = f;
+  active = 1;
 
   return 0;
 }
 
 int close_disk()
 {
-  if (!active) { //if not active, exit
+  if (!active) {
     fprintf(stderr, "close_disk: no open disk\n");
     return -1;
   }
-  close(handle); //close the file descriptor
-  active = handle = 0; //set both var to 0
+  
+  close(handle);
+
+  active = handle = 0;
 
   return 0;
 }
@@ -319,7 +112,7 @@ int block_read(int block, char *buf)
     return -1;
   }
 
-  if (lseek(handle, block * BLOCK_SIZE, SEEK_SET) < 0) { //moves to correct block location
+  if (lseek(handle, block * BLOCK_SIZE, SEEK_SET) < 0) {
     perror("block_read: failed to lseek");
     return -1;
   }
@@ -330,400 +123,4 @@ int block_read(int block, char *buf)
   }
 
   return 0;
-}
-
-//functions for week 2
-
-//finds file and assigns file descriptor
-int fs_open(char *name){
-    int dir_idx = find_file(name);
-    if (dir_idx == -1) return -1;
-
-    int fd = find_free_fd();
-    if (fd == -1) return -1;
-
-    fd_table[fd].used = 1;
-    fd_table[fd].dir_index = dir_idx;
-    fd_table[fd].offset = 0;
-
-    return fd;
-  /*File descriptor is returned
-Max of 32 file descriptors at the same time
-Need to keep a file descriptor table (relate file descriptor to… ?)
-(Can have the same file open multiple times, so name isn’t an option)
-File descriptor table is NOT metadata- should be erased every time you
-mount/unmount, do NOT write it back to your file system*/
-}
-
-//marks descriptors unused (frees them)
-int fs_close(int fildes){
-  if (fildes < 0 || fildes >= MAX_FD) return -1;
-    if (!fd_table[fildes].used) return -1;
-    fd_table[fildes].used = 0;
-    return 0;
-  /*
-  Close the file
-Make sure file descriptor can be reused for a different file after this
-Again, DO NOT touch the metadata
-*/
-  return 0;
-}
-
-int find_free_dir() {
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (!root.entries[i].used) return i;
-    }
-    return -1;
-}
-
-
-int find_free_block() {
-  for (int i = boot.data_start; i < boot.total_blocks; i++) {
-    if (fat.entries[i] == 0) {
-      return i;
-    }
-  }
-    return -1;  
-}
-//adds file meta data
-int fs_create(char *name){
-  if (strlen(name) >= MAX_FILENAME) return -1;
-    if (find_file(name) != -1) return -1; // already exists
-    int idx = find_free_dir();
-    if (idx == -1) return -1;
-
-    strcpy(root.entries[idx].name, name);
-    root.entries[idx].start_block = FAT_EOF;
-    root.entries[idx].file_size = 0;
-    root.entries[idx].used = 1;
-/*Does not open the file, just creates it
-Need to edit the metadata of your file system to indicate that the file has been
-created*/
-  return 0;
-
-}
-//deletes file
-int fs_delete(char *name){
-  int idx = find_file(name);
-  if (idx == -1) return -1;
-
-  int block = root.entries[idx].start_block;
-    //free FAT chain
-  while (block != FAT_EOF && block != 0) {
-      int next = fat.entries[block];
-      fat.entries[block] = 0;
-      block = next;
-  }
-  root.entries[idx].used = 0;
-  root.entries[idx].start_block = FAT_EOF;
-  root.entries[idx].file_size = 0;
-  /*must free all data blocks and metadata
-Also need to indicate that those data blocks have been freed
-*/
-  return 0;
-}
-
-//finds file via file descriptor, locates the starting block, 
-//traverses FAT, then read block by block
-int fs_read(int fildes, void *buf, size_t nbyte){
-  if (fildes < 0 || fildes >= MAX_FD) return -1;
-  if (!fd_table[fildes].used) return -1;
-
-  FileDescriptor *fd = &fd_table[fildes];
-  DirEntry *file = &root.entries[fd->dir_index];
-
-  if (fd->offset >= file->file_size) return 0;
-
-  int bytes_read = 0;
-  int block = file->start_block;
-  int offset = fd->offset;
-
-  char block_buf[BLOCK_SIZE];
-  if (block == FAT_EOF) return 0;
-
-  if (block < 0 || block >= boot.total_blocks) {
-    printf("fs_read ERROR: invalid start block %d\n", block);
-    return -1;
-  }
-
-    //adjust accordingly!
-  while (offset >= BLOCK_SIZE && block != FAT_EOF) {
-    if (block < 0 || block >= boot.total_blocks) {
-      printf("fs_read ERROR: FAT traversal invalid block %d\n", block);
-      return -1;
-    }
-
-    offset -= BLOCK_SIZE;
-    block = fat.entries[block];
-  }
-
-  while (block != FAT_EOF && bytes_read < nbyte) {
-    if (block < 0 || block >= boot.total_blocks) {
-      printf("fs_read ERROR: invalid block %d\n", block);
-      return -1;
-    }
-    block_read(block, block_buf);
-    int to_copy = BLOCK_SIZE - offset;
-      if (to_copy > (nbyte - bytes_read)){
-        to_copy = nbyte - bytes_read;
-      }
-        memcpy((char *)buf + bytes_read, block_buf + offset, to_copy);
-
-        bytes_read += to_copy;
-        fd->offset += to_copy;
-
-        offset = 0;
-        block = fat.entries[block];
-    }
-    return bytes_read;
-  /*Need to find the file descriptor in the file descriptor table, 
-  find which file it points to, find that file in the metadata, 
-  then follow the file through the data blocks until nbytes are read*/
-}
-
-//allocate first block that is empty, write into block, if full finds new block, and linked via FAT for dynamic growth
-int fs_write(int fildes, void *buf, size_t nbyte){
-    if (fildes < 0 || fildes >= MAX_FD) return -1;
-    if (!fd_table[fildes].used) return -1;
-
-    FileDescriptor *fd = &fd_table[fildes];
-    DirEntry *file = &root.entries[fd->dir_index];
-
-    int bytes_written = 0;
-    int block = file->start_block;
-    int offset = fd->offset;
-    if (block != FAT_EOF && (block < 0 || block >= boot.total_blocks)) {
-      printf("fs_write ERROR: invalid start block %d\n", block);
-      return -1;
-    }
-
-    while (offset >= BLOCK_SIZE && block != FAT_EOF) { //moves to correct block
-      if (block < 0 || block >= boot.total_blocks) {
-        printf("fs_write ERROR: FAT traversal invalid block %d\n", block);
-        return -1;
-      }
-      offset -= BLOCK_SIZE;
-      block = fat.entries[block];
-    }   
-
-    // if file is empty, allocate first block
-    if (block == FAT_EOF) {
-        block = find_free_block();
-        if (block == -1) return 0;
-
-        file->start_block = block;
-        fat.entries[block] = FAT_EOF;
-    }
-
-    char block_buf[BLOCK_SIZE];
-
-    while (bytes_written < nbyte) {
-      if (block < 0 || block >= boot.total_blocks) {
-        printf("fs_write ERROR: invalid block %d\n", block);
-        return -1;
-      }
-        block_read(block, block_buf);
-
-        int space = BLOCK_SIZE - offset;
-        int to_copy;
-        if ((nbyte - bytes_written) < space) {
-          to_copy = nbyte - bytes_written;
-        } else {
-          to_copy = space;
-        }
-
-        memcpy(block_buf + offset, (char *)buf + bytes_written, to_copy);
-
-        block_write(block, block_buf);
-
-        bytes_written += to_copy;
-        fd->offset += to_copy;
-
-        offset = 0;
-        if (bytes_written<nbyte) {
-          if (fat.entries[block] == FAT_EOF) {
-            int new_block = find_free_block();
-            if (new_block == -1) break;
-
-            fat.entries[block] = new_block;
-            fat.entries[new_block] = FAT_EOF;
-          }
-          block = fat.entries[block];
-        }
-    }
-    if (fd->offset > file->file_size) {
-      file->file_size = fd->offset;
-    }
-
-    return bytes_written;
-
-    /*Make sure to return the number of bytes actually written*/
-}
-//moves reader and write pointer
-int fs_lseek(int fildes, off_t offset){
-  if (fildes < 0 || fildes >= MAX_FD) return -1;
-    if (!fd_table[fildes].used) return -1;
-
-    if (offset < 0) return -1;
-
-    fd_table[fildes].offset = offset;
-  /*
-  Just move the pointer in the file description table
-Can set to end of file to append when writing
-*/
-  return 0;
-}
-int fs_get_filesize(int fildes) {
-  if (fildes < 0 || fildes >= MAX_FD) return -1;
-  if (!fd_table[fildes].used) return -1;
-
-  int dir_index = fd_table[fildes].dir_index;
-  return root.entries[dir_index].file_size;
-}
-
-
-//freeing unused FAT blocks
-int fs_truncate(int fildes, off_t length){
-  if (fildes < 0 || fildes >= MAX_FD) return -1;
-  if (!fd_table[fildes].used) return -1;
-
-  DirEntry *file = &root.entries[fd_table[fildes].dir_index];
-
-  if (length > file->file_size) return -1; //cannot extend file thru truncatefunc
-  if (length == 0) {
-    int block = file->start_block;
-
-    while (block != FAT_EOF && block != 0) {
-      int next = fat.entries[block];
-      fat.entries[block] = 0;  // mark free
-      block = next;
-    }
-
-      file->start_block = FAT_EOF;
-      file->file_size = 0;
-      fd_table[fildes].offset = 0;
-      return 0;
-    }
-
-    //traverse to fat to find trunc point
-    int block = file->start_block;
-    int prev = -1;
-    int remaining = length;
-
-    while (block != FAT_EOF && remaining > BLOCK_SIZE) {
-      remaining -= BLOCK_SIZE;
-      prev = block;
-      block = fat.entries[block];
-    }
-
-    if (prev != -1) {
-      fat.entries[prev] = FAT_EOF;
-    }
-
-    if (block == FAT_EOF) return 0;
-    //free rest of chain
-    int to_free = fat.entries[block];
-    fat.entries[block] = FAT_EOF;
-
-    while (to_free != FAT_EOF) {
-        int next = fat.entries[to_free];
-        fat.entries[to_free] = 0;
-        to_free = next;
-    }
-    //update file size
-    file->file_size = length;
-    //adjust fildes offset
-    if (fd_table[fildes].offset > length) {
-        fd_table[fildes].offset = length;
-    }
-  /*When the file pointer is larger than the new length, 
-  then it is also set to length (the end of the file)
-  must free data blocks!!!*/
-  return 0;
-}
-
-void *worker_thread(void *arg) {
-    char *disk_name = (char *)arg;
-    if (mount_fs(disk_name) < 0) {
-      printf("mount_fs failed\n");
-      pthread_exit(NULL);
-    }
-    //open original file
-    int fd = fs_open("file1.txt");
-    if (fd < 0) { //failure to open
-      printf("Failed to open file1.txt\n");
-      umount_fs(disk_name);
-      pthread_exit(NULL);
-    }
-    printf("thread original file size = %d\n", fs_get_filesize(fd));
-    //read data
-    char buffer[1024];
-    memset(buffer, 0, sizeof(buffer));
-    int bytes = fs_read(fd, buffer, sizeof(buffer));
-    printf("thread bytes read = %d\n", bytes);
-    printf("thread file size (after read) = %d\n", fs_get_filesize(fd));
-    fs_close(fd);
-    //creates a copy of file
-    fs_create("copy.txt");
-    //read from old file to write into new UPDATED one
-    int fd_copy = fs_open("copy.txt");
-    fs_write(fd_copy, buffer, bytes);
-    printf("thread copy size = %d\n", fs_get_filesize(fd_copy));
-    fs_close(fd_copy);
-    //throw old outdated file away!
-    fs_delete("file1.txt");
-    //hexdump
-    system("hexdump -C liladisk | head -n 40");
-
-    int fd2 = fs_open("copy.txt");
-    fs_lseek(fd2, 5);  //move pointer 
-    fs_truncate(fd2, 5);  //shrink the ifle
-    printf("thread size after truncate = %d\n", fs_get_filesize(fd2));
-
-    char smallbuf[100];
-    memset(smallbuf, 0, sizeof(smallbuf));
-
-    fs_lseek(fd2, 0);
-    fs_read(fd2, smallbuf, sizeof(smallbuf));
-
-    printf("thread after truncate: %s\n", smallbuf);
-    fs_close(fd2);
-
-    //hexdump for truncate func
-    printf("\nthread HEXDUMP after truncate:\n");
-    system("hexdump -C liladisk | head -n 40");
-
-    umount_fs(disk_name);
-
-    printf("Thread Done.\n");
-    pthread_exit(NULL);
-}
-
-int main(){
-  pthread_t tid;
-  char *disk_name = "liladisk";
-  make_fs(disk_name);
-
-  if (mount_fs(disk_name) < 0) {
-    printf("mount failed\n");
-    return -1;
-  }
-  
-  //create file
-  fs_create("file1.txt");
-
-  int fd = fs_open("file1.txt");
-  char *data = "test data";
-  fs_write(fd, data, strlen(data));
-
-  fs_close(fd); //must close file descriptor!!
-  umount_fs(disk_name); 
-  if (pthread_create(&tid, NULL, worker_thread, disk_name) != 0) {
-    perror("pthread_create failed");
-    return -1;
-  }
-  //WAIT!
-  pthread_join(tid, NULL);
-  printf("program finished!\n");
-  return 0;
-}
+} //end of file!
